@@ -1,0 +1,31 @@
+# Niveau 0 : agents, variables Library et secrets Podman, sans image ni service.
+# Les deux rôles en parallèle ; ne touche pas à la pile en place.
+trigger: none
+pr: none
+parameters:
+  - name: environnement
+    type: string
+    default: dev
+    values: [dev, prod]
+  - name: agentPool
+    displayName: Pool des agents des VM
+    type: string
+    default: fred-vms
+
+stages:
+  - template: stage.yml
+    parameters:
+      action: deploy
+      role: storage
+      environnement: ${{ parameters.environnement }}
+      agentPool: ${{ parameters.agentPool }}
+      imageTag: diagnostic
+      etapes: [0-diagnostic]
+  - template: stage.yml
+    parameters:
+      action: deploy
+      role: app
+      environnement: ${{ parameters.environnement }}
+      agentPool: ${{ parameters.agentPool }}
+      imageTag: diagnostic
+      etapes: [0-diagnostic]

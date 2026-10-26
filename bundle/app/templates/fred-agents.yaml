@@ -1,0 +1,86 @@
+# Généré depuis Fred 32e5346db412df63fa95a9870087439975f0d487 par mock-full-deployment/scripts/export-templates.py
+app:
+  gcu_version: v1
+  runtime_id: fred-agents
+  name: Fred default agents
+  base_url: /fred/agents/v2
+  host: 0.0.0.0
+  port: 8000
+  log_level: info
+  log_format: text
+  limit_concurrency: null
+  max_chat_input_chars: 5000
+  openai_compat: false
+skills:
+  directory: package
+security:
+  profile: c3
+  m2m:
+    enabled: true
+    provider: oidc
+    realm_url: https://login.microsoftonline.com/${TENANT_ID}/v2.0
+    client_id: ${RUNTIME_CLIENT_ID}
+    scope: ${API_URI}/.default
+    secret_env_var: KEYCLOAK_AGENTIC_CLIENT_SECRET
+  user:
+    enabled: true
+    provider: oidc
+    realm_url: https://login.microsoftonline.com/${TENANT_ID}/v2.0
+    client_id: ${UI_CLIENT_ID}
+    audience: ${API_APP_ID}
+    scope: ${API_URI}/access_as_user
+    roles_claim:
+    - roles
+    claims:
+      uid: oid
+  authorized_origins:
+  - ${PUBLIC_URL}
+  rebac:
+    enabled: true
+    type: openfga
+    api_url: http://openfga:8080
+  delegation:
+    act_for_people: true
+    accept_delegated_calls: false
+    caller_roles_claim:
+    - roles
+    audience: ${API_APP_ID}
+    service_accounts_only: false
+  user_directory: local
+ai:
+  knowledge_flow_url: http://knowledge-flow-backend:8111/knowledge-flow/v1
+  timeout:
+    connect: 20
+    read: 60
+observability:
+  kpi:
+    prometheus:
+      address: 0.0.0.0
+      port: 9000
+  tracer: logging
+  langfuse:
+    host: http://localhost:3001
+    capture_content: false
+    max_content_chars: 100000
+storage:
+  postgres:
+    host: ${STO_FQDN}
+    port: 5432
+    database: fred
+    username: fred
+    pool_size: 20
+    max_overflow: 20
+  log_store:
+    type: in_memory
+  object_store:
+    type: minio
+    endpoint: https://${STO_FQDN}:8333
+    access_key: ${S3_ACCESS_KEY}
+    secure: true
+scheduler:
+  enabled: false
+platform:
+  control_plane_url: http://control-plane-backend:8222/control-plane/v1
+web_research:
+  enabled: true
+  provider: duckduckgo

@@ -1,0 +1,11 @@
+#!/bin/bash
+# Seule commande root autorisée au compte de l'agent Azure (sudoers). Installée
+# une fois par VM ; elle exécute bundle/deploy.sh ou bundle/stop.sh du checkout,
+# ce qui permet de faire évoluer ces scripts par simple commit.
+# L'entrée standard (variables du pipeline) est transmise telle quelle.
+set -euo pipefail
+if [[ $# -lt 3 || ! $2 =~ ^(deploy|stop)$ || ! $3 =~ ^(storage|app)$ ]]; then
+    echo 'Usage : fred-run <checkout> deploy storage|app [étape] | stop storage|app [--disable]' >&2
+    exit 2
+fi
+exec /bin/bash "$1/bundle/$2.sh" "${@:3}"

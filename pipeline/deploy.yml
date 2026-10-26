@@ -1,0 +1,32 @@
+# Déploie ou met à jour Fred : stockage puis applicatif. Lancement manuel.
+trigger: none
+pr: none
+parameters:
+  - name: environnement
+    type: string
+    default: dev
+    values: [dev, prod]
+  - name: imageTag
+    displayName: Version des images Fred (tag publié dans la registry, ex. 1.4.0)
+    type: string
+  - name: agentPool
+    displayName: Pool des agents des VM
+    type: string
+    default: fred-vms
+
+stages:
+  - template: stage.yml
+    parameters:
+      action: deploy
+      role: storage
+      environnement: ${{ parameters.environnement }}
+      agentPool: ${{ parameters.agentPool }}
+      imageTag: ${{ parameters.imageTag }}
+  - template: stage.yml
+    parameters:
+      action: deploy
+      role: app
+      environnement: ${{ parameters.environnement }}
+      agentPool: ${{ parameters.agentPool }}
+      imageTag: ${{ parameters.imageTag }}
+      dependsOn: [deploy_storage]

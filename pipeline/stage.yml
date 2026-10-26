@@ -1,0 +1,76 @@
+# Un rôle = un stage = un agent sur sa VM. Utilisé par deploy.yml et stop.yml.
+parameters:
+  - name: action          # deploy | stop
+    type: string
+  - name: role            # storage | app
+    type: string
+  - name: environnement
+    type: string
+  - name: agentPool
+    type: string
+  - name: imageTag
+    type: string
+    default: ''
+  - name: options         # stop : --disable
+    type: string
+    default: ''
+  - name: dependsOn
+    type: object
+    default: []
+  - name: etapes          # = fichiers de bundle/deploy/, une tâche Azure chacune
+    type: object
+    default: [1-verifier, 2-preparer, 3-telecharger, 4-secrets, 5-basculer, 6-migrer, 7-demarrer, 8-controler]
+
+stages:
+  - stage: ${{ parameters.action }}_${{ parameters.role }}
+    displayName: ${{ parameters.action }} ${{ parameters.role }}
+    dependsOn: ${{ parameters.dependsOn }}
+    ${{ if eq(parameters.action, 'deploy') }}:
+      variables:
+        - group: fred-${{ parameters.environnement }}
+        - group: fred-${{ parameters.environnement }}-${{ parameters.role }}
+    jobs:
+      - deployment: ${{ parameters.role }}
+        pool:
+          name: ${{ parameters.agentPool }}
+          ${{ if eq(parameters.role, 'storage') }}:
+            demands: [Agent.Name -equals agent-stockage]
+          ${{ if eq(parameters.role, 'app') }}:
+            demands: [Agent.Name -equals agent-applicatif]
+        environment: fred-${{ parameters.environnement }}-${{ parameters.role }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  clean: true
+                  fetchDepth: 1
+                - download: none
+                # Variables transmises sur stdin à la seule commande root autorisée ;
+                # bundle/deploy/lib.sh ne retient que celles de sa liste.
+                - ${{ if eq(parameters.action, 'deploy') }}:
+                  - ${{ each etape in parameters.etapes }}:
+                    - bash: >-
+                        env -0 | sudo -n /usr/local/sbin/fred-run "$(Build.SourcesDirectory)"
+                        deploy ${{ parameters.role }} ${{ etape }}
+                      displayName: ${{ etape }}
+                      env:
+                        FRED_TAG: ${{ parameters.imageTag }}
+                        # Une variable secrète de Library n'est visible que mappée ici.
+                        REGISTRY_PASSWORD: $(REGISTRY_PASSWORD)
+                        FRED_DB_PASSWORD: $(FRED_DB_PASSWORD)
+                        OPENFGA_DB_PASSWORD: $(OPENFGA_DB_PASSWORD)
+                        TEMPORAL_DB_PASSWORD: $(TEMPORAL_DB_PASSWORD)
+                        S3_SECRET_KEY: $(S3_SECRET_KEY)
+                        FRED_POSTGRES_PASSWORD: $(FRED_POSTGRES_PASSWORD)
+                        OPENFGA_PRESHARED_KEY: $(OPENFGA_PRESHARED_KEY)
+                        FRED_BOOTSTRAP_TOKEN: $(FRED_BOOTSTRAP_TOKEN)
+                        OPENAI_API_KEY: $(OPENAI_API_KEY)
+                        CP_SECRET: $(CP_SECRET)
+                        KF_SECRET: $(KF_SECRET)
+                        RUNTIME_SECRET: $(RUNTIME_SECRET)
+                - ${{ if eq(parameters.action, 'stop') }}:
+                  - bash: >-
+                      sudo -n /usr/local/sbin/fred-run "$(Build.SourcesDirectory)"
+                      stop ${{ parameters.role }} ${{ parameters.options }}
+                    displayName: stop ${{ parameters.role }}

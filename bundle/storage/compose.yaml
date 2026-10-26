@@ -1,0 +1,107 @@
+# Stockage : PostgreSQL TLS et S3 HTTPS. Le pare-feu filtre les VM clientes.
+name: fred-sto
+
+services:
+  postgres:
+    image: ${REGISTRY_HOST}/fred/postgres:0.8.7-pg17-trixie
+    user: postgres
+    container_name: postgres
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - ssl_cert_file=/etc/fred/tls/server.crt
+      - -c
+      - ssl_key_file=/etc/fred/tls/server.key
+      - -c
+      - hba_file=/etc/fred/postgres/pg_hba.conf
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - max_connections=300
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/fred_postgres_password
+      FRED_DB_PASSWORD_FILE: /run/secrets/fred_db_password
+      OPENFGA_DB_PASSWORD_FILE: /run/secrets/fred_openfga_db_password
+      TEMPORAL_DB_PASSWORD_FILE: /run/secrets/fred_temporal_db_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_INITDB_ARGS: --auth-local=peer --auth-host=scram-sha-256
+    secrets:
+      - source: fred_postgres_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: fred_db_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: fred_openfga_db_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: fred_temporal_db_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+    ports:
+      - "5432:5432"
+    volumes:
+      - /var/lib/fred/postgres:/var/lib/postgresql/data:Z,U
+      - /etc/fred/tls/postgres:/etc/fred/tls:ro,Z
+      - /etc/fred/postgres/pg_hba.conf:/etc/fred/postgres/pg_hba.conf:ro,Z
+      - /etc/fred/postgres/initdb/10-fred-databases.sh:/docker-entrypoint-initdb.d/10-fred-databases.sh:ro,Z
+    healthcheck:
+      test: [CMD, pg_isready, -q, -U, postgres, -d, postgres]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  seaweedfs:
+    image: ${REGISTRY_HOST}/fred/seaweedfs:4.38
+    user: "1000:1000"
+    entrypoint: [/usr/bin/weed]
+    container_name: seaweedfs
+    hostname: seaweedfs
+    restart: unless-stopped
+    command:
+      - server
+      - -dir=/data
+      - -ip=seaweedfs
+      - -ip.bind=0.0.0.0
+      - -master.port=9333
+      - -volume.port=8080
+      - -volume.max=100
+      - -filer
+      - -filer.port=8888
+      - -s3
+      - -s3.port=8333
+      - -s3.config=/run/secrets/fred_s3_config
+      - -s3.cert.file=/etc/fred/tls/server.crt
+      - -s3.key.file=/etc/fred/tls/server.key
+    ports:
+      - "8333:8333"
+    volumes:
+      - /var/lib/fred/seaweedfs:/data:Z,U
+      - /etc/fred/tls/seaweedfs:/etc/fred/tls:ro,Z
+    secrets:
+      - source: fred_s3_config
+        uid: "1000"
+        gid: "1000"
+        mode: "0400"
+
+secrets:
+  fred_postgres_password:
+    external: true
+  fred_db_password:
+    external: true
+  fred_openfga_db_password:
+    external: true
+  fred_temporal_db_password:
+    external: true
+  fred_s3_config:
+    external: true

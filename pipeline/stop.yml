@@ -1,0 +1,40 @@
+# Arrête Fred : applicatif, puis stockage si cible=all. Aucune variable Library.
+trigger: none
+pr: none
+parameters:
+  - name: environnement
+    type: string
+    default: dev
+    values: [dev, prod]
+  - name: cible
+    displayName: Services à arrêter
+    type: string
+    default: app
+    values: [app, all]
+  - name: desactiverDemarrageAuto
+    displayName: Ne pas redémarrer au prochain boot
+    type: boolean
+    default: false
+  - name: agentPool
+    type: string
+    default: fred-vms
+
+stages:
+  - template: stage.yml
+    parameters:
+      action: stop
+      role: app
+      environnement: ${{ parameters.environnement }}
+      agentPool: ${{ parameters.agentPool }}
+      ${{ if eq(parameters.desactiverDemarrageAuto, true) }}:
+        options: --disable
+  - ${{ if eq(parameters.cible, 'all') }}:
+      - template: stage.yml
+        parameters:
+          action: stop
+          role: storage
+          environnement: ${{ parameters.environnement }}
+          agentPool: ${{ parameters.agentPool }}
+          dependsOn: [stop_app]
+          ${{ if eq(parameters.desactiverDemarrageAuto, true) }}:
+            options: --disable

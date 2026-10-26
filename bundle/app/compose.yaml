@@ -1,0 +1,333 @@
+# Applicatif : TLS vers le stockage, HTTPS pour le navigateur.
+name: fred-app
+
+x-fred-volumes: &fred-volumes
+  - /etc/fred/config:/etc/fred/config:ro,z
+  - /etc/fred/tls/ca.crt:/etc/fred/tls/ca.crt:ro,z
+  - /etc/pki/tls/certs/ca-bundle.crt:/etc/fred/tls/ca-bundle.pem:ro
+  - /etc/pki/tls/certs/ca-bundle.crt:/etc/ssl/certs/ca-certificates.crt:ro
+
+x-fred-env: &fred-env
+  PGSSLMODE: verify-full
+  PGSSLROOTCERT: /etc/fred/tls/ca.crt
+  SSL_CERT_FILE: /etc/fred/tls/ca-bundle.pem
+  REQUESTS_CA_BUNDLE: /etc/fred/tls/ca-bundle.pem
+  FRED_JWT_MAX_LIFETIME_SECONDS: "6000"
+  NO_PROXY: localhost,127.0.0.1,openfga,temporal,control-plane-backend,knowledge-flow-backend,fred-agents,${STO_FQDN}
+  PYTHONUNBUFFERED: "1"
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${APP_PODMAN_SUBNET}
+
+services:
+  temporal-sql:
+    image: ${REGISTRY_HOST}/fred/temporal-admin-tools:${FRED_TAG}
+    restart: "no"
+    profiles: [jobs]
+    secrets: &temporal-sql-secrets
+      - source: fred_temporal_db_password
+        type: env
+        target: SQL_PASSWORD
+    environment:
+      SQL_PLUGIN: postgres12
+      SQL_HOST: ${STO_FQDN}
+      SQL_PORT: "5432"
+      SQL_USER: temporal
+      SQL_TLS: "true"
+      SQL_TLS_CA_FILE: /etc/fred/tls/ca.crt
+      SQL_TLS_SERVER_NAME: ${STO_FQDN}
+    volumes:
+      - /etc/fred/tls/ca.crt:/etc/fred/tls/ca.crt:ro,z
+
+  temporal-cli:
+    image: ${REGISTRY_HOST}/fred/temporal-admin-tools:${FRED_TAG}
+    restart: "no"
+    profiles: [jobs]
+    entrypoint: ["/usr/bin/temporal"]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    tmpfs:
+      - /home/nonroot:U,mode=0700,size=16m
+
+  temporal:
+    image: ${REGISTRY_HOST}/fred/temporal-server:${FRED_TAG}
+    container_name: temporal
+    restart: unless-stopped
+    secrets: &temporal-secrets
+      - source: fred_temporal_db_password
+        type: env
+        target: POSTGRES_PWD
+    volumes:
+      - /etc/fred/tls/ca.crt:/etc/fred/tls/ca.crt:ro,z
+      - /etc/fred/config/temporal.yaml:/etc/fred/temporal/temporal.yaml:ro,z
+    healthcheck:
+      test: ["CMD", "/usr/bin/grpc-health-probe", "-addr=temporal:7233",
+             "-service=temporal.api.workflowservice.v1.WorkflowService"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  openfga-migrate:
+    image: ${REGISTRY_HOST}/fred/openfga:${FRED_TAG}
+    container_name: openfga-migrate
+    restart: "no"
+    profiles: [jobs]
+    command: ["migrate"]
+    secrets: &openfga-secrets
+      - source: fred_openfga_datastore_uri
+        type: env
+        target: OPENFGA_DATASTORE_URI
+      - source: fred_openfga_preshared_key
+        type: env
+        target: OPENFGA_AUTHN_PRESHARED_KEYS
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+    volumes:
+      - /etc/fred/tls/ca.crt:/etc/fred/tls/ca.crt:ro,z
+
+  openfga:
+    image: ${REGISTRY_HOST}/fred/openfga:${FRED_TAG}
+    container_name: openfga
+    restart: unless-stopped
+    command: ["run"]
+    secrets: *openfga-secrets
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_AUTHN_METHOD: preshared
+      OPENFGA_HTTP_ADDR: 0.0.0.0:8080
+      OPENFGA_GRPC_ADDR: 0.0.0.0:8081
+      OPENFGA_PLAYGROUND_ENABLED: "false"
+      OPENFGA_LOG_FORMAT: json
+      OPENFGA_METRICS_ENABLED: "true"
+    volumes:
+      - /etc/fred/tls/ca.crt:/etc/fred/tls/ca.crt:ro,z
+    healthcheck:
+      test: ["CMD", "/usr/bin/grpc-health-probe", "-addr=127.0.0.1:8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  control-plane-migrate:
+    image: ${REGISTRY_HOST}/fred/control-plane-backend:${FRED_TAG}
+    container_name: control-plane-migrate
+    restart: "no"
+    profiles: [jobs]
+    entrypoint: ["alembic"]
+    command: ["upgrade", "head"]
+    secrets: &control-plane-secrets
+      - source: fred_db_password
+        type: env
+        target: FRED_POSTGRES_PASSWORD
+      - source: fred_s3_secret_key
+        type: env
+        target: MINIO_SECRET_KEY
+      - source: fred_openfga_preshared_key
+        type: env
+        target: OPENFGA_API_TOKEN
+      - source: fred_cp_secret
+        type: env
+        target: KEYCLOAK_CONTROL_PLANE_CLIENT_SECRET
+      - source: fred_bootstrap_token
+        type: env
+        target: FRED_BOOTSTRAP_TOKEN
+    environment:
+      <<: *fred-env
+      CONFIG_FILE: /etc/fred/config/control-plane-backend.yaml
+    volumes: *fred-volumes
+
+  knowledge-flow-migrate:
+    image: ${REGISTRY_HOST}/fred/knowledge-flow-backend:${FRED_TAG}
+    container_name: knowledge-flow-migrate
+    restart: "no"
+    profiles: [jobs]
+    entrypoint: ["alembic"]
+    command: ["upgrade", "head"]
+    secrets: &knowledge-flow-secrets
+      - source: fred_db_password
+        type: env
+        target: FRED_POSTGRES_PASSWORD
+      - source: fred_s3_secret_key
+        type: env
+        target: MINIO_SECRET_KEY
+      - source: fred_openfga_preshared_key
+        type: env
+        target: OPENFGA_API_TOKEN
+      - source: fred_kf_secret
+        type: env
+        target: KEYCLOAK_KNOWLEDGE_FLOW_CLIENT_SECRET
+      - source: fred_openai_api_key
+        type: env
+        target: OPENAI_API_KEY
+    environment:
+      <<: *fred-env
+      CONFIG_FILE: /etc/fred/config/knowledge-flow-backend.yaml
+    volumes: *fred-volumes
+
+  fred-agents-migrate:
+    image: ${REGISTRY_HOST}/fred/fred-agents:${FRED_TAG}
+    container_name: fred-agents-migrate
+    restart: "no"
+    profiles: [jobs]
+    entrypoint: ["python"]
+    command: ["-m", "fred_runtime", "migrate"]
+    secrets: &fred-agents-secrets
+      - source: fred_db_password
+        type: env
+        target: FRED_POSTGRES_PASSWORD
+      - source: fred_s3_secret_key
+        type: env
+        target: MINIO_SECRET_KEY
+      - source: fred_openfga_preshared_key
+        type: env
+        target: OPENFGA_API_TOKEN
+      - source: fred_runtime_secret
+        type: env
+        target: KEYCLOAK_AGENTIC_CLIENT_SECRET
+      - source: fred_openai_api_key
+        type: env
+        target: OPENAI_API_KEY
+    environment:
+      <<: *fred-env
+      CONFIG_FILE: /etc/fred/config/fred-agents.yaml
+    volumes: *fred-volumes
+
+  control-plane-backend:
+    image: ${REGISTRY_HOST}/fred/control-plane-backend:${FRED_TAG}
+    container_name: control-plane-backend
+    restart: unless-stopped
+    secrets: *control-plane-secrets
+    environment:
+      <<: *fred-env
+      CONFIG_FILE: /etc/fred/config/control-plane-backend.yaml
+    volumes: *fred-volumes
+    depends_on:
+      openfga:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+
+  control-plane-worker:
+    image: ${REGISTRY_HOST}/fred/control-plane-backend:${FRED_TAG}
+    container_name: control-plane-worker
+    restart: unless-stopped
+    entrypoint: ["python"]
+    command: ["-m", "control_plane_backend.main_worker"]
+    secrets: *control-plane-secrets
+    environment:
+      <<: *fred-env
+      CONFIG_FILE: /etc/fred/config/control-plane-backend.yaml
+    volumes: *fred-volumes
+    depends_on:
+      control-plane-backend:
+        condition: service_started
+
+  knowledge-flow-backend:
+    image: ${REGISTRY_HOST}/fred/knowledge-flow-backend:${FRED_TAG}
+    container_name: knowledge-flow-backend
+    restart: unless-stopped
+    secrets: *knowledge-flow-secrets
+    environment:
+      <<: *fred-env
+      CONFIG_FILE: /etc/fred/config/knowledge-flow-backend.yaml
+    volumes: *fred-volumes
+    tmpfs: &kf-tmpfs
+      - /home/nonroot/.config:U,mode=0700,size=64m
+      - /home/nonroot/.cache:U,mode=0700,size=256m
+      - /home/nonroot/.fred:U,mode=0700,size=256m
+      - /home/nonroot/.paddlex:U,mode=0700,size=256m
+    depends_on:
+      openfga:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      control-plane-backend:
+        condition: service_started
+
+  knowledge-flow-worker:
+    image: ${REGISTRY_HOST}/fred/knowledge-flow-backend:${FRED_TAG}
+    container_name: knowledge-flow-worker
+    restart: unless-stopped
+    entrypoint: ["python"]
+    command: ["-m", "knowledge_flow_backend.main_worker"]
+    secrets: *knowledge-flow-secrets
+    environment:
+      <<: *fred-env
+      CONFIG_FILE: /etc/fred/config/knowledge-flow-backend.yaml
+    volumes: *fred-volumes
+    tmpfs: *kf-tmpfs
+    depends_on:
+      knowledge-flow-backend:
+        condition: service_started
+
+  fred-agents:
+    image: ${REGISTRY_HOST}/fred/fred-agents:${FRED_TAG}
+    container_name: fred-agents
+    restart: unless-stopped
+    secrets: *fred-agents-secrets
+    environment:
+      <<: *fred-env
+      CONFIG_FILE: /etc/fred/config/fred-agents.yaml
+      FRED_MODELS_CATALOG_FILE: /etc/fred/config/models_catalog.yaml
+    volumes: *fred-volumes
+    depends_on:
+      control-plane-backend:
+        condition: service_started
+      knowledge-flow-backend:
+        condition: service_started
+
+  frontend:
+    image: ${REGISTRY_HOST}/fred/frontend:${FRED_TAG}
+    container_name: frontend
+    restart: unless-stopped
+    environment:
+      FRONTEND_AGENTIC_UPSTREAM: http://fred-agents:8000
+      FRONTEND_KNOWLEDGE_FLOW_UPSTREAM: http://knowledge-flow-backend:8111
+      FRONTEND_CONTROL_PLANE_UPSTREAM: http://control-plane-backend:8222
+      FRONTEND_ENABLE_APPLICATIONS: "false"
+      FRONTEND_THEME_URL: https://${STO_FQDN}:8333/fred-themes/theme.zip
+      FRONTEND_THEME_REQUIRED: "false"
+      FRONTEND_THEME_S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+    secrets: &frontend-secrets
+      - source: fred_s3_secret_key
+        type: env
+        target: FRONTEND_THEME_S3_SECRET_KEY
+    volumes:
+      - /etc/pki/tls/certs/ca-bundle.crt:/etc/ssl/certs/ca-certificates.crt:ro
+      - /etc/fred/tls/frontend:/etc/fred/tls/frontend:ro
+    ports:
+      - "443:8443"
+    tmpfs:
+      - /var/lib/fred/theme:U,mode=0700,size=16m
+    depends_on:
+      fred-agents:
+        condition: service_started
+      knowledge-flow-backend:
+        condition: service_started
+      control-plane-backend:
+        condition: service_started
+
+# type: env est une extension podman-compose pour les secrets externes.
+secrets:
+  fred_bootstrap_token:
+    external: true
+  fred_cp_secret:
+    external: true
+  fred_db_password:
+    external: true
+  fred_kf_secret:
+    external: true
+  fred_openai_api_key:
+    external: true
+  fred_openfga_datastore_uri:
+    external: true
+  fred_openfga_preshared_key:
+    external: true
+  fred_runtime_secret:
+    external: true
+  fred_s3_secret_key:
+    external: true
+  fred_temporal_db_password:
+    external: true
