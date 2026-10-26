@@ -61,6 +61,8 @@ pipeline/
 ├── deploy.yml                stockage puis applicatif
 ├── stop.yml                  applicatif, puis stockage si cible=all
 ├── diagnostic.yml            niveau 0 : agents, variables, secrets, sans image
+├── test-azure.yml            autonome : Azure DevOps, agents, Podman rootless
+├── test-agent.sh             le même test en script, pour une mise en production classique
 └── stage.yml                 un stage = un rôle = un agent
 ```
 

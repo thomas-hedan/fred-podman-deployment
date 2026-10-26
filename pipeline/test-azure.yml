@@ -1,0 +1,117 @@
+# Test autonome d'Azure DevOps et de ses agents : pool, agent, Environment, variables,
+# secrets, Podman rootless. N'utilise rien d'autre du dépôt (ni fred-run, ni sudo,
+# ni Library) et ne touche à aucun service.
+# Avant le premier run : Edit → Variables → TEST_SECRET, cocher "Keep this value secret".
+trigger: none
+pr: none
+
+parameters:
+  - name: agentPool
+    displayName: Pool d'agents
+    type: string
+    default: fred-vms
+  - name: agents
+    displayName: Agents à tester (Agent.Name), un job chacun
+    type: object
+    default: [agent-fred]
+  - name: environment
+    displayName: Environment Azure DevOps (créé au premier run s'il n'existe pas)
+    type: string
+    default: fred-test
+  - name: variableGroup
+    displayName: Groupe de Library à charger (vide = aucun)
+    type: string
+    default: ''
+  - name: image
+    displayName: Image de test, joignable depuis les VM
+    type: string
+    default: registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+variables:
+  - name: TEST_PUBLIC
+    value: valeur-publique-visible
+  - ${{ if ne(parameters.variableGroup, '') }}:
+    - group: ${{ parameters.variableGroup }}
+
+jobs:
+  - ${{ each agent in parameters.agents }}:
+    - deployment: ${{ replace(agent, '-', '_') }}
+      displayName: ${{ agent }}
+      pool:
+        name: ${{ parameters.agentPool }}
+        demands:
+          - 'Agent.Name -equals ${{ agent }}'
+      environment: ${{ parameters.environment }}
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - download: none   # pas d'artefact ; un job deployment ne fait pas de checkout
+
+              - bash: |
+                  echo "Agent   : $AGENT_NAME v$AGENT_VERSION · pool ${{ parameters.agentPool }}"
+                  echo "Compte  : $(id -un) (uid $(id -u)) · groupes $(id -Gn)"
+                  echo "Machine : $(hostname -f) · $(. /etc/os-release && echo "$PRETTY_NAME") · noyau $(uname -r)"
+                  echo "Dossier : $PIPELINE_WORKSPACE ($(df -h --output=avail "$PIPELINE_WORKSPACE" | tail -1 | tr -d ' ') libres)"
+                  echo "Run     : $BUILD_BUILDNUMBER · $BUILD_SOURCEBRANCH"
+                displayName: 1 · agent et machine
+
+              - bash: |
+                  issues=0
+                  warn() { echo "##vso[task.logissue type=warning]$*"; issues=$((issues + 1)); }
+                  echo "Variable publique : TEST_PUBLIC = $TEST_PUBLIC"
+                  # Une variable secrète n'arrive dans l'environnement que mappée (env:).
+                  [[ -z $(printenv TEST_SECRET) ]] && echo "Secret non mappé : invisible (attendu)" \
+                      || warn "TEST_SECRET visible sans mappage"
+                  if [[ $SECRET_MAPPE == '$('* ]]; then
+                      warn "TEST_SECRET non défini dans les variables du pipeline"
+                  else
+                      echo "Secret mappé : reçu, ${#SECRET_MAPPE} caractères"
+                      echo "Masquage dans les logs (doit afficher ***) : $SECRET_MAPPE"
+                  fi
+                  ((issues == 0)) || echo "##vso[task.complete result=SucceededWithIssues;]"
+                displayName: 2 · variables et secrets Azure
+                env:
+                  SECRET_MAPPE: $(TEST_SECRET)
+
+              - bash: |
+                  if sudo -n true 2>/dev/null; then
+                      echo "##vso[task.logissue type=warning]sudo complet sans mot de passe : à restreindre"
+                  else
+                      echo "sudo complet refusé (attendu)"
+                  fi
+                  rules=$(sudo -n -l 2>/dev/null | sed -n '/may run/,$p' | tail -n +2)
+                  echo "Règles sudo sans mot de passe :"; echo "${rules:-  aucune}"
+                  [[ -x /usr/local/sbin/fred-run ]] && echo "fred-run installé" || echo "fred-run absent"
+                displayName: 3 · droits sudo (lecture seule)
+
+              - bash: |
+                  set -euo pipefail
+                  podman --version
+                  podman compose version 2>/dev/null | tail -1 \
+                      || echo "##vso[task.logissue type=warning]podman compose indisponible"
+                  podman info --format 'rootless={{.Host.Security.Rootless}} · stockage={{.Store.GraphDriverName}} · cgroups={{.Host.CgroupsVersion}}'
+                displayName: 4 · Podman
+                continueOnError: true
+
+              - bash: |
+                  set -euo pipefail
+                  value=$SECRET_MAPPE
+                  [[ $value == '$('* ]] && value=genere-$(date +%s%N)   # TEST_SECRET absent
+                  name=azdo_test_$BUILD_BUILDID
+                  trap 'podman secret rm "$name" >/dev/null 2>&1 || true' EXIT
+                  printf '%s' "$value" | podman secret create "$name" - >/dev/null
+                  echo "Secret Podman $name créé"
+                  podman pull -q "$IMAGE" >/dev/null
+                  echo "Image $IMAGE téléchargée ($(podman image inspect --format '{{.Digest}}' "$IMAGE"))"
+                  read_back=$(podman run --rm --secret "$name",target=test "$IMAGE" cat /run/secrets/test)
+                  if [[ $read_back == "$value" ]]; then
+                      echo "Conteneur : /run/secrets/test identique au secret Azure"
+                  else
+                      echo "##vso[task.logissue type=error]secret lu dans le conteneur différent"
+                      exit 1
+                  fi
+                displayName: 5 · secret Podman dans un conteneur
+                env:
+                  SECRET_MAPPE: $(TEST_SECRET)
+                  IMAGE: ${{ parameters.image }}
